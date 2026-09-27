@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   verifyGrid, makeIdentityKnots, cellCorners, cornerJacobians,
-  bilinearMap, locateCell, checkSharedEdges, cross2,
+  bilinearMap, locateCell, checkSharedEdges, checkCellOverlaps, quadsOverlapArea, cross2,
 } from '../src/shared/bilinear.js';
 
 const ident = makeIdentityKnots;
@@ -19,6 +19,7 @@ test('恒等网格：通过，J_min=1，标记原样换算，共享边连续', (
   assert.deepEqual(res.minJacobian.cell, { r: 0, c: 0 });
   assert.equal(res.edges.continuous, true);
   assert.equal(res.edges.edgeCount, 4); // 2*1 + 1*2
+  assert.equal(res.overlap.disjoint, true);
   assert.deepEqual(
     res.markers.map((m) => [m.x, m.y]),
     [[0.5, 0.5], [1.5, 1.5], [2, 1]],
@@ -203,4 +204,77 @@ test('cellCorners 按固定角点序返回四角', () => {
     cellCorners(knots, 1, 1),
     [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }, { x: 1, y: 2 }],
   );
+});
+
+/* ---------------- 全局重叠判定 ---------------- */
+
+// 2×4 螺旋网：三行网结半径 5、10、15；方向依次为 (1,0)、(0,-1)、(-1,0)、(0,1)、(3/5,-4/5)
+const spiralKnots = () => {
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1], [3 / 5, -4 / 5]];
+  return [5, 10, 15].map((R) => dirs.map(([dx, dy]) => ({ x: R * dx, y: R * dy })));
+};
+const spiralMarkers = [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }];
+
+test('全局重叠：局部不翻折的螺旋网，相距单元 (0,0) 与 (0,3) 正面积重叠，被拒绝且标记为 null', () => {
+  const res = verifyGrid({ rows: 2, cols: 4, knots: spiralKnots(), markers: spiralMarkers });
+  // 局部判定全部通过：无翻折、无退化
+  assert.equal(res.firstFailure, null);
+  assert.ok(res.minJacobian.value > 0);
+  assert.ok(res.cells.every((cell) => cell.ok));
+  // 但任意单元对不得正面积重叠：首项证据按单元对行优先字典序
+  assert.equal(res.ok, false);
+  assert.equal(res.overlap.disjoint, false);
+  assert.deepEqual(res.overlap.firstOverlap, { a: { r: 0, c: 0 }, b: { r: 0, c: 3 } });
+  // 失败时不得交付纹样换算位置
+  assert.equal(res.markers, null);
+});
+
+test('全局重叠的数学事实：不相邻单元 (0,0) 与 (0,3) 把两个标记映到同一织补坐标 (3.75,-3.75)', () => {
+  const knots = spiralKnots();
+  const m1 = locateCell(0.5, 0.5, 2, 4);
+  const m2 = locateCell(23 / 6, 0.5, 2, 4);
+  assert.deepEqual([m1.r, m1.c], [0, 0]);
+  assert.deepEqual([m2.r, m2.c], [0, 3]);
+  const p1 = bilinearMap(cellCorners(knots, m1.r, m1.c), m1.s, m1.t);
+  const p2 = bilinearMap(cellCorners(knots, m2.r, m2.c), m2.s, m2.t);
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  assert.ok(near(p1.x, 3.75) && near(p1.y, -3.75), JSON.stringify(p1));
+  assert.ok(near(p2.x, 3.75) && near(p2.y, -3.75), JSON.stringify(p2));
+});
+
+test('quadsOverlapArea：精确区分正面积重叠与合法接触', () => {
+  const A = [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }];
+  // 部分交叉（正面积）
+  assert.equal(quadsOverlapArea(A, [{ x: 2, y: 2 }, { x: 6, y: 2 }, { x: 6, y: 6 }, { x: 2, y: 6 }]), true);
+  // 包含（顶点全部在内部）
+  assert.equal(quadsOverlapArea(A, [{ x: 1, y: 1 }, { x: 3, y: 1 }, { x: 3, y: 3 }, { x: 1, y: 3 }]), true);
+  // 包含且顶点落在对方边上（无严格内部顶点、无边交叉，仍为正面积）
+  assert.equal(quadsOverlapArea(A, [{ x: 1, y: 0 }, { x: 4, y: 1 }, { x: 3, y: 4 }, { x: 0, y: 3 }]), true);
+  // 完全相同的像
+  assert.equal(quadsOverlapArea(A, A.map((p) => ({ ...p }))), true);
+  // 合法共用完整边
+  assert.equal(quadsOverlapArea(A, [{ x: 4, y: 0 }, { x: 8, y: 0 }, { x: 8, y: 4 }, { x: 4, y: 4 }]), false);
+  // 部分共线边接触（零面积）
+  assert.equal(quadsOverlapArea(A, [{ x: 4, y: 1 }, { x: 8, y: 1 }, { x: 8, y: 3 }, { x: 4, y: 3 }]), false);
+  // 仅共用一个顶点
+  assert.equal(quadsOverlapArea(A, [{ x: 4, y: 4 }, { x: 8, y: 4 }, { x: 8, y: 8 }, { x: 4, y: 8 }]), false);
+  // 完全分离
+  assert.equal(quadsOverlapArea(A, [{ x: 5, y: 0 }, { x: 8, y: 0 }, { x: 8, y: 4 }, { x: 5, y: 4 }]), false);
+});
+
+test('checkCellOverlaps：恒等网格无重叠（对角单元仅共顶点合法），单元对计数正确', () => {
+  const res = checkCellOverlaps(ident(3, 3), 3, 3);
+  assert.equal(res.disjoint, true);
+  assert.equal(res.pairCount, 36); // C(9,2)
+  assert.equal(res.firstOverlap, null);
+});
+
+test('翻折优先：存在翻折/退化时不做重叠判定（overlap 为 null）', () => {
+  const knots = ident(2, 2);
+  knots[1][1] = { x: -1, y: -1 };
+  const res = verifyGrid({ rows: 2, cols: 2, knots, markers: threeMarkers });
+  assert.equal(res.ok, false);
+  assert.notEqual(res.firstFailure, null);
+  assert.equal(res.overlap, null);
+  assert.equal(res.markers, null);
 });

@@ -27,6 +27,12 @@
  * 同一线性插值（双线性映射限制在边界上即为线性插值），因此只要两侧
  * 单元共用同一对网结——结构化网格在数据模型上天然如此——整条边
  * （含边上每一点）连续重合。checkSharedEdges 对该不变量做显式核验。
+ *
+ * 全局重叠：局部不翻折并不排除相距单元的织补像覆盖同一区域（纹样落点
+ * 失去唯一归属）。通过局部判定的单元是严格凸四边形，双线性映射在严格凸
+ * 四边形上是双射，单元的像即其角点凸四边形区域；故单元对的正面积重叠
+ * 等价于两个严格凸四边形的内部相交，由 quadsOverlapArea 以分离边判据
+ * 精确判定（见该函数注释），checkCellOverlaps 按行优先字典序给出首项证据。
  */
 
 export const MIN_ROWS = 2;
@@ -142,6 +148,70 @@ export function checkSharedEdges(knots, rows, cols) {
 }
 
 /**
+ * 两个严格凸四边形是否发生正面积重叠（精确判定，只取整数叉积符号）。
+ *
+ * 数学依据：两个严格凸多边形内部不相交 ⇔ 存在一条弱分离线；
+ * 而两个凸多边形的弱分离线必可取为其中某一多边形某条边所在的直线
+ * （分离轴判据的多边形形式）。因此：
+ *   正面积重叠 ⇔ 两个四边形的任意一条边都不把对方弱分离到外侧。
+ * 边 A→B 弱分离 Q ⇔ Q 的全部顶点 V 满足 cross(B−A, V−A) ≤ 0
+ * （按 cellCorners 的环绕序，多边形内部位于每条边 cross > 0 的一侧）。
+ *
+ * 前导条件：两四边形均严格凸且环绕方向与 cellCorners 一致
+ * （verifyGrid 只在全网四角 J 均 > 0 后才调用，天然满足）。
+ * 合法接触不会被误判：共享完整边或仅共享顶点都属于弱分离（接触处
+ * 叉积 = 0），部分共线边接触亦然——只有正面积重叠才判定为真。
+ */
+export function quadsOverlapArea(P, Q) {
+  const separatedByEdge = (A, B) => {
+    for (let i = 0; i < 4; i++) {
+      const a = A[i];
+      const b = A[(i + 1) % 4];
+      const ex = b.x - a.x;
+      const ey = b.y - a.y;
+      let allOutside = true;
+      for (const v of B) {
+        if (cross2(ex, ey, v.x - a.x, v.y - a.y) > 0) {
+          allOutside = false;
+          break;
+        }
+      }
+      if (allOutside) return true;
+    }
+    return false;
+  };
+  return !separatedByEdge(P, Q) && !separatedByEdge(Q, P);
+}
+
+/**
+ * 全网单元对的重叠检查：按行优先字典序枚举全部单元对，
+ * 返回首项正面积重叠证据（顺序稳定）。
+ * 合法共用完整边或仅共用顶点的单元对不算重叠。
+ */
+export function checkCellOverlaps(knots, rows, cols) {
+  const cells = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) cells.push({ r, c, corners: cellCorners(knots, r, c) });
+  }
+  const pairCount = (cells.length * (cells.length - 1)) / 2;
+  for (let i = 0; i < cells.length; i++) {
+    for (let j = i + 1; j < cells.length; j++) {
+      if (quadsOverlapArea(cells[i].corners, cells[j].corners)) {
+        return {
+          disjoint: false,
+          pairCount,
+          firstOverlap: {
+            a: { r: cells[i].r, c: cells[i].c },
+            b: { r: cells[j].r, c: cells[j].c },
+          },
+        };
+      }
+    }
+  }
+  return { disjoint: true, pairCount, firstOverlap: null };
+}
+
+/**
  * 输入校验：网格规格、网结整数坐标、纹样标记数量与范围。
  * 返回错误数组（空数组表示通过），每个错误含 kind 与中文 message。
  */
@@ -212,7 +282,9 @@ export function validateInput(spec) {
  * 1. 输入校验（无效坐标直接判负）；
  * 2. 逐单元（行优先）计算四角雅可比，首项失败按行优先单元 + 固定角点顺序报告；
  * 3. 相邻单元共享边连续性核验；
- * 4. 仅当全网通过时，才把纹样标记换算到织补坐标（避免输出失真位置）。
+ * 4. 全局重叠判定：任意单元对的织补像不得发生正面积重叠（合法共用完整边
+ *    或仅共用顶点除外）；首项证据按单元对行优先字典序报告；
+ * 5. 仅当全网通过时，才把纹样标记换算到织补坐标（避免输出失真位置）。
  *
  * 返回结果对象：
  *   ok, stage('validation'|'geometry'), errors,
@@ -220,6 +292,8 @@ export function validateInput(spec) {
  *   minJacobian: { value, cell:{r,c}, corner } | null,
  *   cells: 行优先单元证据数组,
  *   edges: { continuous, edgeCount, mismatches },
+ *   overlap: { disjoint, pairCount, firstOverlap: { a:{r,c}, b:{r,c} } | null }
+ *            | null（存在翻折/退化时不适用：此时单元像不再是凸四边形）,
  *   markers: 换算后的标记数组（失败时为 null）
  */
 export function verifyGrid(spec) {
@@ -227,7 +301,7 @@ export function verifyGrid(spec) {
   if (errors.length) {
     return {
       ok: false, stage: 'validation', errors,
-      firstFailure: null, minJacobian: null, cells: [], edges: null, markers: null,
+      firstFailure: null, minJacobian: null, cells: [], edges: null, overlap: null, markers: null,
     };
   }
 
@@ -257,7 +331,10 @@ export function verifyGrid(spec) {
   }
 
   const edges = checkSharedEdges(knots, rows, cols);
-  const ok = !firstFailure && edges.continuous;
+  // 全局重叠判定：仅在无翻折/退化时进行——此时每个单元的织补像都是严格凸
+  // 四边形，单元对的正面积重叠等价于两个凸四边形的内部相交。
+  const overlap = firstFailure ? null : checkCellOverlaps(knots, rows, cols);
+  const ok = !firstFailure && edges.continuous && (overlap === null || overlap.disjoint);
 
   let mappedMarkers = null;
   if (ok) {
@@ -274,6 +351,6 @@ export function verifyGrid(spec) {
 
   return {
     ok, stage: 'geometry', errors: [],
-    firstFailure, minJacobian, cells, edges, markers: mappedMarkers,
+    firstFailure, minJacobian, cells, edges, overlap, markers: mappedMarkers,
   };
 }

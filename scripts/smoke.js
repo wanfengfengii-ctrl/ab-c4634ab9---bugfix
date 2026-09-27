@@ -102,6 +102,24 @@ check(!!health && health.status === 'ok', '健康检查 GET /healthz', JSON.stri
   check(body.markers === null, '样例D：无效输入不输出纹样位置');
 }
 
+/* 6) 样例 E：全局重叠 —— 局部不翻折但相距单元织补像正面积重叠，首项证据 = 单元(0,0) 与 (0,3)，不输出标记 */
+{
+  // 2×4 螺旋网：三行网结半径 5、10、15；方向依次为 (1,0)、(0,-1)、(-1,0)、(0,1)、(3/5,-4/5)
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1], [3 / 5, -4 / 5]];
+  const k = [5, 10, 15].map((R) => dirs.map(([dx, dy]) => ({ x: R * dx, y: R * dy })));
+  const { body } = await postVerify({
+    rows: 2, cols: 4, knots: k,
+    markers: [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }],
+  });
+  const fo = (body.overlap && body.overlap.firstOverlap) || {};
+  check(
+    body.ok === false && body.firstFailure === null
+      && fo.a && fo.b && fo.a.r === 0 && fo.a.c === 0 && fo.b.r === 0 && fo.b.c === 3,
+    '样例E：全局重叠首项证据（单元对行优先字典序）', JSON.stringify(body.overlap && body.overlap.firstOverlap),
+  );
+  check(body.markers === null, '样例E：重叠失败时不输出纹样换算位置');
+}
+
 if (failures) {
   console.error(`\n冒烟验收未通过：${failures} 项失败`);
   process.exit(1);

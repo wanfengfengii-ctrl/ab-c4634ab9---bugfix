@@ -57,6 +57,28 @@ test('API 错误处理：方法不允许与非法 JSON', async () => {
   });
 });
 
+test('API：全局重叠网格被拒绝，首项证据稳定，不输出标记', async () => {
+  // 2×4 螺旋网：半径 5/10/15 × 方向 (1,0)、(0,-1)、(-1,0)、(0,1)、(3/5,-4/5)
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1], [3 / 5, -4 / 5]];
+  const knots = [5, 10, 15].map((R) => dirs.map(([dx, dy]) => ({ x: R * dx, y: R * dy })));
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: 2, cols: 4, knots,
+        markers: [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.firstFailure, null); // 局部判定全部通过
+    assert.deepEqual(body.overlap.firstOverlap, { a: { r: 0, c: 0 }, b: { r: 0, c: 3 } });
+    assert.equal(body.markers, null);
+  });
+});
+
 test('静态文件：不存在的路径返回 404，路径穿越被拒绝', async () => {
   await withServer(async (base) => {
     const missing = await fetch(`${base}/no-such-file.js`);

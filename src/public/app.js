@@ -223,23 +223,34 @@ function renderConclusion(res) {
   }
 
   if (!res.ok) {
-    const f = res.firstFailure;
-    const n = f.cell.r * state.cols + f.cell.c + 1;
-    parts.push(`<div class="banner fail">校核未通过：网格存在${f.type === 'fold' ? '翻折' : '退化'}。</div>`);
-    parts.push(`<p class="first-failure">首项失败证据：单元 (${f.cell.r},${f.cell.c})（行优先第 ${n} 个单元），`
-      + `角点 ${CORNER_NAMES[f.corner]}，J = ${f.jacobian}，判定：${FAILURE_TYPE_NAMES[f.type]}。</p>`);
+    if (res.firstFailure) {
+      const f = res.firstFailure;
+      const n = f.cell.r * state.cols + f.cell.c + 1;
+      parts.push(`<div class="banner fail">校核未通过：网格存在${f.type === 'fold' ? '翻折' : '退化'}。</div>`);
+      parts.push(`<p class="first-failure">首项失败证据：单元 (${f.cell.r},${f.cell.c})（行优先第 ${n} 个单元），`
+        + `角点 ${CORNER_NAMES[f.corner]}，J = ${f.jacobian}，判定：${FAILURE_TYPE_NAMES[f.type]}。</p>`);
+    } else if (res.overlap && res.overlap.firstOverlap) {
+      const { a, b } = res.overlap.firstOverlap;
+      const na = a.r * state.cols + a.c + 1;
+      const nb = b.r * state.cols + b.c + 1;
+      parts.push('<div class="banner fail">校核未通过：相距单元的织补像发生正面积重叠，纹样落点失去唯一归属。</div>');
+      parts.push(`<p class="first-failure">首项全局重叠证据：单元 (${a.r},${a.c})（行优先第 ${na} 个单元）`
+        + `与单元 (${b.r},${b.c})（行优先第 ${nb} 个单元）的织补像重叠面积大于 0。</p>`);
+    }
     parts.push('<p class="hint">已拦截：未输出纹样换算位置，以免失真坐标误导织补。</p>');
     parts.push(renderCellTable(res));
     return parts.join('');
   }
 
   const m = res.minJacobian;
-  parts.push('<div class="banner ok">校核通过：全网连续无翻折、无退化。</div>');
+  parts.push('<div class="banner ok">校核通过：全网连续无翻折、无退化、无单元重叠。</div>');
   parts.push(`<p>全网最小雅可比证据：<b>J<sub>min</sub> = ${m.value}</b>，`
     + `位于单元 (${m.cell.r},${m.cell.c}) 角点 ${CORNER_NAMES[m.corner]}。`
     + `双线性函数的最小值必在角点取得，故单元内部任意位置 J ≥ J<sub>min</sub> &gt; 0（连续判定，非采样）。</p>`);
   parts.push(`<p>相邻单元共享边：${res.edges.continuous ? '连续' : '不连续'}`
     + `（共 ${res.edges.edgeCount} 条内部边，两侧共用同一对网结，边上双线性退化为同一线性插值）。</p>`);
+  parts.push(`<p>单元对重叠检查：共 ${res.overlap.pairCount} 对单元，均无正面积重叠`
+    + `（合法共用完整边或仅共用顶点不计入）。</p>`);
 
   const markerRows = res.markers.map((mk) =>
     `<tr>
@@ -317,6 +328,8 @@ function cellStatus(res, r, c) {
   if (!res || res.stage !== 'geometry') return 'plain';
   const cell = res.cells[r * state.cols + c];
   if (!cell) return 'plain';
+  const o = res.overlap && res.overlap.firstOverlap;
+  if (o && ((o.a.r === r && o.a.c === c) || (o.b.r === r && o.b.c === c))) return 'failFirst';
   if (cell.ok) return 'ok';
   const f = res.firstFailure;
   return f && f.cell.r === r && f.cell.c === c ? 'failFirst' : 'fail';
