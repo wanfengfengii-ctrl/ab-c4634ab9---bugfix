@@ -2,11 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   verifyGrid, makeIdentityKnots, cellCorners, cornerJacobians,
-  bilinearMap, locateCell, checkSharedEdges, cross2,
+  bilinearMap, locateCell, checkSharedEdges, checkCellOverlaps,
+  quadsOverlapPositiveArea, cross2,
 } from '../src/shared/bilinear.js';
 
 const ident = makeIdentityKnots;
 const threeMarkers = [{ u: 0.5, v: 0.5 }, { u: 1, v: 1 }, { u: 1.5, v: 1.5 }];
+
+/** 题目回归样例：三行网结半径 5/10/15，方向点 (1,0) (0,-1) (-1,0) (0,1) (3/5,-4/5) */
+function makeRadialKnots() {
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1], [3 / 5, -4 / 5]];
+  return [5, 10, 15].map((R) => dirs.map(([dx, dy]) => ({ x: R * dx, y: R * dy })));
+}
+const radialMarkers = [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }];
 
 test('恒等网格：通过，J_min=1，标记原样换算，共享边连续', () => {
   const res = verifyGrid({
@@ -121,6 +129,63 @@ test('连续判定的数学依据：角点最小值 = 稠密采样最小值（�
   }
 });
 
+test('全局重叠判定的数学依据：分离轴判定 = 裁剪求交面积（验证定理本身，应用不裁剪）', () => {
+  let seed = 7;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const randomConvexQuad = () => {
+    for (;;) {
+      const angs = [rand(), rand(), rand(), rand()].sort((a, b) => a - b).map((a) => a * 2 * Math.PI);
+      const pts = angs.map((a) => ({
+        x: Math.floor(rand() * 21) - 10 + Math.round(8 * Math.cos(a)),
+        y: Math.floor(rand() * 21) - 10 + Math.round(8 * Math.sin(a)),
+      }));
+      if (cornerJacobians(pts).every((j) => j > 0)) return pts; // 严格凸 + 顶点循环序
+    }
+  };
+  // 独立对照：Sutherland–Hodgman 裁剪求交集面积（浮点，仅用于测试对照）
+  const clipArea = (P, Q) => {
+    let poly = P.slice();
+    const sgn = Math.sign(Q.reduce((s, q, i) => {
+      const n = Q[(i + 1) % 4];
+      return s + cross2(q.x, q.y, n.x, n.y);
+    }, 0));
+    for (let i = 0; i < 4; i++) {
+      const a = Q[i];
+      const b = Q[(i + 1) % 4];
+      const ex = b.x - a.x;
+      const ey = b.y - a.y;
+      const inside = (p) => sgn * cross2(ex, ey, p.x - a.x, p.y - a.y) >= 0;
+      const out = [];
+      for (let j = 0; j < poly.length; j++) {
+        const p = poly[j];
+        const q = poly[(j + 1) % poly.length];
+        if (inside(p) !== inside(q)) {
+          const dx = q.x - p.x;
+          const dy = q.y - p.y;
+          const t = -cross2(ex, ey, p.x - a.x, p.y - a.y) / cross2(ex, ey, dx, dy);
+          out.push({ x: p.x + t * dx, y: p.y + t * dy });
+        }
+        if (inside(q)) out.push(q);
+      }
+      poly = out;
+    }
+    let s = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const n = poly[(i + 1) % poly.length];
+      s += cross2(poly[i].x, poly[i].y, n.x, n.y);
+    }
+    return Math.abs(s) / 2;
+  };
+  for (let trial = 0; trial < 2000; trial++) {
+    const P = randomConvexQuad();
+    const Q = randomConvexQuad();
+    const pred = quadsOverlapPositiveArea(P, Q);
+    const area = clipArea(P, Q);
+    assert.equal(pred, area > 1e-7, `trial ${trial}: 判定=${pred} 交集面积=${area}`);
+    assert.equal(pred, quadsOverlapPositiveArea(Q, P), `trial ${trial}: 判定不对称`);
+  }
+});
+
 test('locateCell：边界归入末单元，越界返回 null', () => {
   assert.deepEqual(locateCell(0, 0, 2, 2), { r: 0, c: 0, s: 0, t: 0 });
   assert.deepEqual(locateCell(2, 2, 2, 2), { r: 1, c: 1, s: 1, t: 1 });
@@ -203,4 +268,77 @@ test('cellCorners 按固定角点序返回四角', () => {
     cellCorners(knots, 1, 1),
     [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }, { x: 1, y: 2 }],
   );
+});
+
+test('quadsOverlapPositiveArea：正面积重叠判定（共边/共顶点/部分共边不算重叠）', () => {
+  const A = [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }];
+  // 零面积接触：共用完整边、共用部分边、仅共用一个顶点、顶点落在对方边上
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 2, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 2 }, { x: 2, y: 2 }]), false);
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 2, y: 1 }, { x: 4, y: 1 }, { x: 4, y: 3 }, { x: 2, y: 3 }]), false);
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 2, y: 2 }, { x: 4, y: 2 }, { x: 4, y: 4 }, { x: 2, y: 4 }]), false);
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 1, y: 2 }, { x: 3, y: 2 }, { x: 3, y: 4 }, { x: 1, y: 4 }]), false);
+  // 完全分离
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 3, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 2 }, { x: 3, y: 2 }]), false);
+  // 正面积重叠：部分交叠、边交叉、包含、顶点触及边界的内接（内部仍相交）
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 1, y: 0 }, { x: 3, y: 0 }, { x: 3, y: 2 }, { x: 1, y: 2 }]), true);
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: -1, y: 0 }, { x: 3, y: 0 }, { x: 3, y: 1 }, { x: -1, y: 1 }]), true);
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: -1, y: -1 }, { x: 3, y: -1 }, { x: 3, y: 3 }, { x: -1, y: 3 }]), true);
+  assert.equal(quadsOverlapPositiveArea(A, [{ x: 1, y: -1 }, { x: 3, y: 1 }, { x: 1, y: 3 }, { x: -1, y: 1 }]), true);
+});
+
+test('checkCellOverlaps：恒等网格无重叠，相邻共边与对角共顶点均合法', () => {
+  const res = checkCellOverlaps(ident(3, 4), 3, 4);
+  assert.equal(res.disjoint, true);
+  assert.equal(res.pairCount, 0);
+  assert.equal(res.first, null);
+  assert.equal(res.checkedCount, (12 * 11) / 2); // 12 个单元两两组合
+  assert.deepEqual(res.pairs, []);
+});
+
+test('全局重叠：2×4 径向网格局部不翻折仍被拒绝，首项证据 = 单元对 (0,0)-(0,3)，标记为 null', () => {
+  const res = verifyGrid({ rows: 2, cols: 4, knots: makeRadialKnots(), markers: radialMarkers });
+  // 前提：每个单元局部判定均通过、共享边连续——失败只能来自全局重叠
+  assert.equal(res.firstFailure, null);
+  assert.ok(res.cells.every((cell) => cell.ok));
+  assert.equal(res.edges.continuous, true);
+  // 全局重叠：首项证据按行优先单元对顺序稳定给出
+  assert.equal(res.ok, false);
+  assert.equal(res.stage, 'geometry');
+  assert.deepEqual(res.overlaps.first, { a: { r: 0, c: 0 }, b: { r: 0, c: 3 } });
+  assert.ok(res.overlaps.pairCount >= 1);
+  assert.equal(res.overlaps.checkedCount, (8 * 7) / 2); // 8 个单元两两组合
+  // 失败时不得交付纹样换算位置
+  assert.equal(res.markers, null);
+});
+
+test('隐患复现：若无全局判定，单元 (0,0) 与 (0,3) 的标记会换算到同一织补点 (3.75,-3.75)', () => {
+  const knots = makeRadialKnots();
+  const p1 = bilinearMap(cellCorners(knots, 0, 0), 0.5, 0.5);
+  const loc2 = locateCell(23 / 6, 0.5, 2, 4);
+  const p2 = bilinearMap(cellCorners(knots, loc2.r, loc2.c), loc2.s, loc2.t);
+  assert.deepEqual([loc2.r, loc2.c], [0, 3]);
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  assert.ok(near(p1.x, 3.75) && near(p1.y, -3.75));
+  assert.ok(near(p2.x, 3.75) && near(p2.y, -3.75));
+});
+
+test('全局不重叠的正常网格：2×4 规格仍通过并完成标记换算', () => {
+  const res = verifyGrid({ rows: 2, cols: 4, knots: ident(2, 4), markers: radialMarkers });
+  assert.equal(res.ok, true);
+  assert.equal(res.overlaps.disjoint, true);
+  assert.equal(res.overlaps.pairCount, 0);
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  assert.deepEqual([res.markers[0].x, res.markers[0].y], [0.5, 0.5]);
+  assert.ok(near(res.markers[1].x, 23 / 6) && near(res.markers[1].y, 0.5));
+  assert.deepEqual([res.markers[2].x, res.markers[2].y], [2, 1.5]);
+});
+
+test('翻折优先于全局重叠：存在翻折时不执行重叠判定（overlaps 为 null）', () => {
+  const knots = makeRadialKnots();
+  knots[1][1] = { x: 100, y: 100 }; // 制造翻折
+  const res = verifyGrid({ rows: 2, cols: 4, knots, markers: radialMarkers });
+  assert.equal(res.ok, false);
+  assert.notEqual(res.firstFailure, null);
+  assert.equal(res.overlaps, null);
+  assert.equal(res.markers, null);
 });

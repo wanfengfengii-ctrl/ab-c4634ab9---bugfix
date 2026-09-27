@@ -223,23 +223,40 @@ function renderConclusion(res) {
   }
 
   if (!res.ok) {
-    const f = res.firstFailure;
-    const n = f.cell.r * state.cols + f.cell.c + 1;
-    parts.push(`<div class="banner fail">校核未通过：网格存在${f.type === 'fold' ? '翻折' : '退化'}。</div>`);
-    parts.push(`<p class="first-failure">首项失败证据：单元 (${f.cell.r},${f.cell.c})（行优先第 ${n} 个单元），`
-      + `角点 ${CORNER_NAMES[f.corner]}，J = ${f.jacobian}，判定：${FAILURE_TYPE_NAMES[f.type]}。</p>`);
+    if (res.firstFailure) {
+      const f = res.firstFailure;
+      const n = f.cell.r * state.cols + f.cell.c + 1;
+      parts.push(`<div class="banner fail">校核未通过：网格存在${f.type === 'fold' ? '翻折' : '退化'}。</div>`);
+      parts.push(`<p class="first-failure">首项失败证据：单元 (${f.cell.r},${f.cell.c})（行优先第 ${n} 个单元），`
+        + `角点 ${CORNER_NAMES[f.corner]}，J = ${f.jacobian}，判定：${FAILURE_TYPE_NAMES[f.type]}。</p>`);
+      parts.push('<p class="hint">已拦截：未输出纹样换算位置，以免失真坐标误导织补。</p>');
+      parts.push(renderCellTable(res));
+      return parts.join('');
+    }
+    if (res.overlaps && !res.overlaps.disjoint) {
+      const { a, b } = res.overlaps.first;
+      parts.push('<div class="banner fail">校核未通过：定位网存在全局重叠，纹样落点失去唯一归属。</div>');
+      parts.push(`<p class="first-failure">首项全局重叠证据：单元 (${a.r},${a.c}) 与单元 (${b.r},${b.c}) `
+        + `的织补区域发生正面积重叠（行优先单元对顺序；共 ${res.overlaps.pairCount} 对重叠）。`
+        + `各单元局部均不翻折，但相距的单元覆盖了同一织补区域。</p>`);
+      parts.push('<p class="hint">已拦截：未输出纹样换算位置，以免失真坐标误导织补。</p>');
+      parts.push(renderCellTable(res));
+      return parts.join('');
+    }
+    parts.push('<div class="banner fail">校核未通过：相邻单元共享边不连续。</div>');
     parts.push('<p class="hint">已拦截：未输出纹样换算位置，以免失真坐标误导织补。</p>');
-    parts.push(renderCellTable(res));
     return parts.join('');
   }
 
   const m = res.minJacobian;
-  parts.push('<div class="banner ok">校核通过：全网连续无翻折、无退化。</div>');
+  parts.push('<div class="banner ok">校核通过：全网连续无翻折、无退化、无全局重叠。</div>');
   parts.push(`<p>全网最小雅可比证据：<b>J<sub>min</sub> = ${m.value}</b>，`
     + `位于单元 (${m.cell.r},${m.cell.c}) 角点 ${CORNER_NAMES[m.corner]}。`
     + `双线性函数的最小值必在角点取得，故单元内部任意位置 J ≥ J<sub>min</sub> &gt; 0（连续判定，非采样）。</p>`);
   parts.push(`<p>相邻单元共享边：${res.edges.continuous ? '连续' : '不连续'}`
     + `（共 ${res.edges.edgeCount} 条内部边，两侧共用同一对网结，边上双线性退化为同一线性插值）。</p>`);
+  parts.push(`<p>全局重叠判定：共检查 ${res.overlaps.checkedCount} 对单元，任意两单元的织补区域均无正面积重叠`
+    + `（分离轴定理弱形式，整数精确比较；共边、共顶点的零面积接触不算重叠）。</p>`);
 
   const markerRows = res.markers.map((mk) =>
     `<tr>
@@ -317,9 +334,18 @@ function cellStatus(res, r, c) {
   if (!res || res.stage !== 'geometry') return 'plain';
   const cell = res.cells[r * state.cols + c];
   if (!cell) return 'plain';
-  if (cell.ok) return 'ok';
-  const f = res.firstFailure;
-  return f && f.cell.r === r && f.cell.c === c ? 'failFirst' : 'fail';
+  if (res.firstFailure) {
+    if (cell.ok) return 'ok';
+    const f = res.firstFailure;
+    return f.cell.r === r && f.cell.c === c ? 'failFirst' : 'fail';
+  }
+  if (res.overlaps && !res.overlaps.disjoint) {
+    const inPair = (p) =>
+      (p.a.r === r && p.a.c === c) || (p.b.r === r && p.b.c === c);
+    if (inPair(res.overlaps.first)) return 'failFirst';
+    return res.overlaps.pairs.some(inPair) ? 'fail' : 'ok';
+  }
+  return cell.ok ? 'ok' : 'fail';
 }
 
 function draw() {

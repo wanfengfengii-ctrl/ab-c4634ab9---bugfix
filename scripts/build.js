@@ -8,7 +8,8 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * 构建：
- * 1. 自检——恒等网格必须通过校核且 J_min = 1，防止把损坏的数学模块打进产物；
+ * 1. 自检——恒等网格必须通过校核且 J_min = 1，且已知全局重叠的径向网格必须被拒绝，
+ *    防止把损坏的数学模块打进产物；
  * 2. 组装 dist/public（页面 + 共享数学模块），并生成带 SHA-256 的构建清单。
  */
 export async function build() {
@@ -20,6 +21,23 @@ export async function build() {
   });
   if (!probe.ok || probe.minJacobian.value !== 1) {
     throw new Error('构建自检失败：恒等网格校核未通过');
+  }
+
+  // 自检：局部不翻折但全局重叠的 2×4 径向网格必须被拒绝（首项证据 = 单元对 (0,0)-(0,3)）
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1], [3 / 5, -4 / 5]];
+  const radialKnots = [5, 10, 15].map((R) => dirs.map(([dx, dy]) => ({ x: R * dx, y: R * dy })));
+  const overlapProbe = verifyGrid({
+    rows: 2,
+    cols: 4,
+    knots: radialKnots,
+    markers: [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }],
+  });
+  const first = overlapProbe.overlaps && overlapProbe.overlaps.first;
+  if (
+    overlapProbe.ok || overlapProbe.markers !== null || !first
+    || first.a.r !== 0 || first.a.c !== 0 || first.b.r !== 0 || first.b.c !== 3
+  ) {
+    throw new Error('构建自检失败：全局重叠网格未被拒绝');
   }
 
   const srcPublic = path.join(ROOT, 'src', 'public');

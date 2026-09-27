@@ -27,6 +27,23 @@
  * 同一线性插值（双线性映射限制在边界上即为线性插值），因此只要两侧
  * 单元共用同一对网结——结构化网格在数据模型上天然如此——整条边
  * （含边上每一点）连续重合。checkSharedEdges 对该不变量做显式核验。
+ *
+ * 全局不重叠判定
+ * --------------
+ * 局部不翻折（逐单元 J > 0）并不排除相距的单元覆盖同一织补区域：
+ * 两个互不相邻的单元可能在织补平面上发生正面积重叠，使落在重叠区的
+ * 纹样标记失去唯一归属。因此除局部判定外，还须做全局重叠判定。
+ *
+ * 单元的四角雅可比全为正 ⟺ 四边形 C0C1C2C3 严格凸（四个拐角转向同号），
+ * 此时双线性映射是 [0,1]² 到该凸四边形的双射，故单元的织补区域即其四角
+ * 凸四边形。两个单元的织补区域发生正面积重叠 ⟺ 两个凸四边形内部相交。
+ *
+ * 分离轴定理（弱形式）：两个凸多边形内部不相交 ⟺ 存在某个多边形某条边
+ * 的法向轴，使两者在该轴上的投影弱分离（maxA ≤ minB 或 maxB ≤ minA）。
+ * 于是：正面积重叠 ⟺ 全部 8 条边法向轴上的投影都（严格）相交。
+ * 网结坐标为整数时，边法向与投影点积均为整数，弱分离的比较是精确整数
+ * 比较，无数值模糊地带。合法共用完整边或仅共用顶点的单元（零面积接触）
+ * 必存在弱分离轴，不会被判为重叠。
  */
 
 export const MIN_ROWS = 2;
@@ -142,6 +159,72 @@ export function checkSharedEdges(knots, rows, cols) {
 }
 
 /**
+ * 两个严格凸四边形（四角按固定角点序）是否发生正面积重叠。
+ * 判定依据：正面积重叠 ⟺ 内部相交 ⟺ 不存在弱分离的边法向轴（分离轴定理弱形式）。
+ * 仅比较整数点积，精确；共边、共顶点等零面积接触返回 false。
+ */
+export function quadsOverlapPositiveArea(P, Q) {
+  for (const poly of [P, Q]) {
+    for (let i = 0; i < 4; i++) {
+      const p1 = poly[i];
+      const p2 = poly[(i + 1) % 4];
+      // 边的法向（整数）：(dx, dy) → (dy, -dx)
+      const nx = p2.y - p1.y;
+      const ny = p1.x - p2.x;
+      let minP = Infinity, maxP = -Infinity, minQ = Infinity, maxQ = -Infinity;
+      for (const p of P) {
+        const d = p.x * nx + p.y * ny;
+        if (d < minP) minP = d;
+        if (d > maxP) maxP = d;
+      }
+      for (const q of Q) {
+        const d = q.x * nx + q.y * ny;
+        if (d < minQ) minQ = d;
+        if (d > maxQ) maxQ = d;
+      }
+      if (maxP <= minQ || maxQ <= minP) return false; // 弱分离 ⇒ 无正面积重叠
+    }
+  }
+  return true;
+}
+
+/**
+ * 全局重叠核验：检查任意两个单元的织补区域（凸四边形）是否发生正面积重叠。
+ * 仅在所有单元局部不翻折（严格凸）后调用；单元对按行优先顺序枚举，
+ * 首项重叠证据即行优先序下的第一对。
+ * 返回 { disjoint, checkedCount, pairCount, first, pairs }：
+ *   first 为首个重叠单元对 { a:{r,c}, b:{r,c} }（无重叠时为 null）。
+ */
+export function checkCellOverlaps(knots, rows, cols) {
+  const cellList = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      cellList.push({ r, c, corners: cellCorners(knots, r, c) });
+    }
+  }
+  const pairs = [];
+  let checkedCount = 0;
+  for (let i = 0; i < cellList.length; i++) {
+    for (let j = i + 1; j < cellList.length; j++) {
+      checkedCount++;
+      if (quadsOverlapPositiveArea(cellList[i].corners, cellList[j].corners)) {
+        pairs.push({
+          a: { r: cellList[i].r, c: cellList[i].c },
+          b: { r: cellList[j].r, c: cellList[j].c },
+        });
+      }
+    }
+  }
+  return {
+    disjoint: pairs.length === 0,
+    checkedCount,
+    pairCount: pairs.length,
+    first: pairs.length ? pairs[0] : null,
+    pairs,
+  };
+}
+
+/**
  * 输入校验：网格规格、网结整数坐标、纹样标记数量与范围。
  * 返回错误数组（空数组表示通过），每个错误含 kind 与中文 message。
  */
@@ -212,7 +295,9 @@ export function validateInput(spec) {
  * 1. 输入校验（无效坐标直接判负）；
  * 2. 逐单元（行优先）计算四角雅可比，首项失败按行优先单元 + 固定角点顺序报告；
  * 3. 相邻单元共享边连续性核验；
- * 4. 仅当全网通过时，才把纹样标记换算到织补坐标（避免输出失真位置）。
+ * 4. 全局重叠核验：任意两单元的织补区域不得发生正面积重叠
+ *   （仅当所有单元局部不翻折、四边形严格凸时执行；首项证据按行优先单元对顺序报告）；
+ * 5. 仅当全网通过时，才把纹样标记换算到织补坐标（避免输出失真或归属不唯一的位置）。
  *
  * 返回结果对象：
  *   ok, stage('validation'|'geometry'), errors,
@@ -220,6 +305,7 @@ export function validateInput(spec) {
  *   minJacobian: { value, cell:{r,c}, corner } | null,
  *   cells: 行优先单元证据数组,
  *   edges: { continuous, edgeCount, mismatches },
+ *   overlaps: { disjoint, checkedCount, pairCount, first, pairs } | null（存在翻折/退化时不执行，为 null）,
  *   markers: 换算后的标记数组（失败时为 null）
  */
 export function verifyGrid(spec) {
@@ -227,7 +313,7 @@ export function verifyGrid(spec) {
   if (errors.length) {
     return {
       ok: false, stage: 'validation', errors,
-      firstFailure: null, minJacobian: null, cells: [], edges: null, markers: null,
+      firstFailure: null, minJacobian: null, cells: [], edges: null, overlaps: null, markers: null,
     };
   }
 
@@ -257,7 +343,9 @@ export function verifyGrid(spec) {
   }
 
   const edges = checkSharedEdges(knots, rows, cols);
-  const ok = !firstFailure && edges.continuous;
+  // 全局重叠判定以单元严格凸为前提：存在翻折/退化时跳过（firstFailure 已判负）
+  const overlaps = firstFailure ? null : checkCellOverlaps(knots, rows, cols);
+  const ok = !firstFailure && edges.continuous && overlaps !== null && overlaps.disjoint;
 
   let mappedMarkers = null;
   if (ok) {
@@ -274,6 +362,6 @@ export function verifyGrid(spec) {
 
   return {
     ok, stage: 'geometry', errors: [],
-    firstFailure, minJacobian, cells, edges, markers: mappedMarkers,
+    firstFailure, minJacobian, cells, edges, overlaps, markers: mappedMarkers,
   };
 }

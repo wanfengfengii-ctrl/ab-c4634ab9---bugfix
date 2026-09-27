@@ -102,6 +102,45 @@ check(!!health && health.status === 'ok', '健康检查 GET /healthz', JSON.stri
   check(body.markers === null, '样例D：无效输入不输出纹样位置');
 }
 
+/* 6) 样例 E：全局重叠 —— 2×4 径向网格局部不翻折，但单元 (0,0) 与 (0,3) 正面积重叠 */
+{
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1], [3 / 5, -4 / 5]];
+  const knots = [5, 10, 15].map((R) => dirs.map(([dx, dy]) => ({ x: R * dx, y: R * dy })));
+  const { body } = await postVerify({
+    rows: 2, cols: 4, knots,
+    markers: [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }],
+  });
+  check(
+    body.ok === false && body.firstFailure === null && Array.isArray(body.cells)
+    && body.cells.every((cell) => cell.ok),
+    '样例E：各单元局部判定均通过（重叠非翻折所致）',
+  );
+  const o = (body.overlaps && body.overlaps.first) || {};
+  check(
+    body.ok === false && o.a && o.a.r === 0 && o.a.c === 0 && o.b && o.b.r === 0 && o.b.c === 3,
+    '样例E：首项全局重叠证据 = 单元对 (0,0)-(0,3)', JSON.stringify(body.overlaps && body.overlaps.first),
+  );
+  check(body.markers === null, '样例E：重叠时不输出纹样换算位置');
+}
+
+/* 7) 样例 F：2×4 不重叠网格 —— 通过，标记正常换算 */
+{
+  const { body } = await postVerify({
+    rows: 2, cols: 4, knots: ident(2, 4),
+    markers: [{ u: 0.5, v: 0.5 }, { u: 23 / 6, v: 0.5 }, { u: 2, v: 1.5 }],
+  });
+  check(
+    body.ok === true && body.overlaps && body.overlaps.disjoint === true && body.overlaps.pairCount === 0,
+    '样例F：2×4 不重叠网格校核通过（无全局重叠）',
+  );
+  const m = body.markers || [];
+  check(
+    m.length === 3 && near(m[0].x, 0.5) && near(m[0].y, 0.5)
+    && near(m[1].x, 23 / 6) && near(m[1].y, 0.5) && near(m[2].x, 2) && near(m[2].y, 1.5),
+    '样例F：标记换算位置正确', JSON.stringify(m),
+  );
+}
+
 if (failures) {
   console.error(`\n冒烟验收未通过：${failures} 项失败`);
   process.exit(1);
